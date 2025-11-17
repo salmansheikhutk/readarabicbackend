@@ -89,6 +89,78 @@ def get_book(book_id):
             'error': str(e)
         }), 500
 
+@app.route('/api/define/<word>', methods=['GET'])
+def define_word(word):
+    """Get word definition from AraTools API"""
+    try:
+        print(f"\n{'='*60}")
+        print(f"WORD DEFINITION REQUEST")
+        print(f"{'='*60}")
+        print(f"Selected word: {word}")
+        
+        # AraTools API endpoint
+        api_url = f"https://aratools.com/api/v1/dictionary/lookup/ar/{word}"
+        print(f"API URL: {api_url}")
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        print(f"Calling AraTools API...")
+        response = requests.get(api_url, headers=headers, timeout=5)
+        response.raise_for_status()
+        
+        data = response.json()
+        print(f"AraTools Response Status: {response.status_code}")
+        print(f"Raw response keys: {list(data.keys())}")
+        print(f"Definitions found: {len(data.get('words', []))}")
+        print(f"Response Data:")
+        print(f"{'-'*60}")
+        if 'words' in data and data['words']:
+            print(f"\nFormatted definitions:")
+            for idx, result in enumerate(data['words'], 1):
+                form = result.get('voc_form', result.get('form', 'N/A'))
+                gloss = result.get('nice_gloss', 'N/A')
+                root = result.get('root')
+                if root and isinstance(root, str):
+                    root = '-'.join(root)
+                else:
+                    root = ''
+                print(f"{idx}. Form: {form}")
+                print(f"   Gloss: {gloss}")
+                if root:
+                    print(f"   Root: {root}")
+                print()
+        else:
+            print(f"\nNo words found in response")
+        print(f"{'-'*60}")
+        print(f"{'='*60}\n")
+        
+        return jsonify({
+            'success': True,
+            'word': word,
+            'definition': data
+        })
+    except requests.exceptions.Timeout:
+        print(f"ERROR: Request timeout for word '{word}'")
+        return jsonify({
+            'success': False,
+            'error': 'Request timeout - AraTools API did not respond in time'
+        }), 504
+    except requests.exceptions.RequestException as e:
+        print(f"ERROR: Request exception for word '{word}': {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': f'Failed to fetch definition: {str(e)}'
+        }), 500
+    except Exception as e:
+        print(f"ERROR: Unexpected error for word '{word}': {str(e)}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""

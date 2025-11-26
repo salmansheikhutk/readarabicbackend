@@ -1,13 +1,38 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
 import traceback
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for React frontend
 
 # Turath.io API configuration
 BASE_URL = 'https://files.turath.io/books-v3-unobfus'
+
+# Database configuration
+DB_CONFIG = {
+    'host': os.getenv('DB_HOST', 'localhost'),
+    'database': os.getenv('DB_NAME', 'readarabic'),
+    'user': os.getenv('DB_USER', 'postgres'),
+    'password': os.getenv('DB_PASSWORD', ''),
+    'port': os.getenv('DB_PORT', '5432')
+}
+
+def get_db_connection():
+    """Create a database connection."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        return conn
+    except Exception as e:
+        print(f"Database connection error: {e}")
+        traceback.print_exc()
+        return None
 
 def load_book(book_id: int):
     """Load a book from the source URL using its ID."""
@@ -27,41 +52,147 @@ def load_book(book_id: int):
         traceback.print_exc()
         return None
 
+@app.route('/api/categories', methods=['GET'])
+def get_categories():
+    """Get all book categories."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'success': False,
+                'error': 'Database connection failed'
+            }), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT cat_id, category_name, 
+                   (SELECT COUNT(*) FROM books_metadata WHERE cat_id = book_categories.cat_id) as book_count
+            FROM book_categories
+            ORDER BY category_name
+        """)
+        categories = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'categories': categories
+        })
+    except Exception as e:
+        print(f"Error fetching categories: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/authors', methods=['GET'])
+def get_authors():
+    """Get all authors."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'success': False,
+                'error': 'Database connection failed'
+            }), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT a.author_id, a.author_name, 
+                   COUNT(bm.id) as book_count
+            FROM authors a
+            LEFT JOIN books_metadata bm ON bm.author_id = a.author_id
+            GROUP BY a.author_id, a.author_name
+            HAVING COUNT(bm.id) > 0
+            ORDER BY a.author_name
+        """)
+        authors = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'authors': authors
+        })
+    except Exception as e:
+        print(f"Error fetching authors: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 @app.route('/api/books', methods=['GET'])
 def list_books():
-    """List available books (only book 10)"""
+    """List books with optional filtering by category or search term."""
     try:
-        book_id = 10
-        book_data = load_book(book_id)
+        cat_id = request.args.get('category', type=int)
+        author_id = request.args.get('author', type=int)
+        limit = request.args.get('limit', 10000, type=int)  # Set high default to fetch all books
+        offset = request.args.get('offset', 0, type=int)
         
-        books = []
-        if book_data:
-            # Extract title from meta
-            title = book_data.get('meta', {}).get('name', f'Book {book_id}')
-            # Extract author info if available
-            author_info = book_data.get('meta', {}).get('info', '')
-            author = 'Unknown'
-            if 'مؤلف' in author_info or 'المؤلف' in author_info:
-                # Try to extract author name from info field
-                lines = author_info.split('\n')
-                for line in lines:
-                    if 'مؤلف' in line or 'المؤلف' in line:
-                        author = line.split(':')[-1].strip() if ':' in line else line.strip()
-                        break
-            
-            books.append({
-                'id': book_id,
-                'title': title,
-                'author': author,
-                'url': f'/api/book/{book_id}'
-            })
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'success': False,
+                'error': 'Database connection failed'
+            }), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Build query based on filters
+        query = """
+            SELECT bm.id, bm.name, bm.type, bm.info, bm.version, 
+                   bm.cat_id, bc.category_name,
+                   bm.pdf_link, bm.pdf_size, bm.author_id
+            FROM books_metadata bm
+            LEFT JOIN book_categories bc ON bm.cat_id = bc.cat_id
+            WHERE 1=1
+        """
+        params = []
+        
+        if cat_id:
+            query += " AND bm.cat_id = %s"
+            params.append(cat_id)
+        
+        if author_id:
+            query += " AND bm.author_id = %s"
+            params.append(author_id)
+        
+        query += " ORDER BY bm.id ASC LIMIT %s OFFSET %s"
+        params.extend([limit, offset])
+        
+        cursor.execute(query, params)
+        books = cursor.fetchall()
+        
+        # Get total count
+        count_query = "SELECT COUNT(*) as total FROM books_metadata bm WHERE 1=1"
+        count_params = []
+        if cat_id:
+            count_query += " AND bm.cat_id = %s"
+            count_params.append(cat_id)
+        if author_id:
+            count_query += " AND bm.author_id = %s"
+            count_params.append(author_id)
+        
+        cursor.execute(count_query, count_params)
+        total = cursor.fetchone()['total']
+        
+        cursor.close()
+        conn.close()
         
         return jsonify({
             'success': True,
             'books': books,
-            'count': len(books)
+            'count': len(books),
+            'total': total,
+            'offset': offset,
+            'limit': limit
         })
     except Exception as e:
+        print(f"Error fetching books: {e}")
+        traceback.print_exc()
         return jsonify({
             'success': False,
             'error': str(e)

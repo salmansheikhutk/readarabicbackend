@@ -496,6 +496,193 @@ def get_vocabulary(user_id):
             'error': str(e)
         }), 500
 
+@app.route('/api/vocabulary/<int:vocab_id>', methods=['PUT'])
+def update_vocabulary(vocab_id):
+    """Update vocabulary translation"""
+    try:
+        data = request.get_json()
+        translation = data.get('translation')
+        
+        if not translation:
+            return jsonify({
+                'success': False,
+                'error': 'Translation is required'
+            }), 400
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'success': False,
+                'error': 'Database connection failed'
+            }), 500
+        
+        cursor = conn.cursor()
+        
+        # Update translation
+        cursor.execute("""
+            UPDATE user_vocabulary
+            SET translation = %s
+            WHERE id = %s
+        """, (translation, vocab_id))
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Translation updated successfully'
+        })
+        
+    except Exception as e:
+        print(f"Error updating vocabulary: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/vocabulary/due/<int:user_id>', methods=['GET'])
+def get_due_vocabulary(user_id):
+    """Get vocabulary words that are due for review"""
+    try:
+        book_id = request.args.get('book_id', type=int)
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'success': False,
+                'error': 'Database connection failed'
+            }), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get words due for review (next_review_date <= now)
+        query = """
+            SELECT id, word, translation, book_id, page_number, volume_number, word_position,
+                   easiness_factor, next_review_date, review_count, correct_count, incorrect_count
+            FROM user_vocabulary
+            WHERE user_id = %s AND next_review_date <= NOW()
+        """
+        params = [user_id]
+        
+        if book_id:
+            query += " AND book_id = %s"
+            params.append(book_id)
+        
+        query += " ORDER BY next_review_date ASC"
+        
+        cursor.execute(query, params)
+        due_words = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'vocabulary': due_words,
+            'count': len(due_words)
+        })
+        
+    except Exception as e:
+        print(f"Error fetching due vocabulary: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/vocabulary/<int:vocab_id>/review', methods=['PUT'])
+def update_vocabulary_review(vocab_id):
+    """Update vocabulary review statistics after practice"""
+    try:
+        data = request.get_json()
+        correct = data.get('correct', False)
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'success': False,
+                'error': 'Database connection failed'
+            }), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Fetch current vocabulary item
+        cursor.execute("""
+            SELECT easiness_factor, review_count, correct_count, incorrect_count
+            FROM user_vocabulary
+            WHERE id = %s
+        """, (vocab_id,))
+        
+        vocab = cursor.fetchone()
+        if not vocab:
+            cursor.close()
+            conn.close()
+            return jsonify({
+                'success': False,
+                'error': 'Vocabulary item not found'
+            }), 404
+        
+        # Spaced repetition algorithm
+        easiness = float(vocab['easiness_factor']) if vocab['easiness_factor'] else 2.5
+        review_count = vocab['review_count'] or 0
+        correct_count = vocab['correct_count'] or 0
+        incorrect_count = vocab['incorrect_count'] or 0
+        
+        if correct:
+            correct_count += 1
+            easiness = max(1.3, easiness + 0.1)  # Increase easiness
+            
+            # Calculate next review interval
+            if review_count == 0:
+                interval_days = 1
+            elif review_count == 1:
+                interval_days = 3
+            elif review_count == 2:
+                interval_days = 7
+            else:
+                interval_days = int(7 * (easiness ** (review_count - 2)))
+            
+            review_count += 1
+        else:
+            incorrect_count += 1
+            easiness = max(1.3, easiness - 0.2)  # Decrease easiness
+            interval_days = 1  # Reset to 1 day
+            review_count = 0  # Reset review count
+        
+        # Calculate next review date
+        from datetime import datetime, timedelta
+        next_review = datetime.now() + timedelta(days=interval_days)
+        
+        # Update database
+        cursor.execute("""
+            UPDATE user_vocabulary
+            SET easiness_factor = %s,
+                next_review_date = %s,
+                review_count = %s,
+                correct_count = %s,
+                incorrect_count = %s
+            WHERE id = %s
+        """, (easiness, next_review, review_count, correct_count, incorrect_count, vocab_id))
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'interval_days': interval_days,
+            'next_review_date': next_review.isoformat()
+        })
+        
+    except Exception as e:
+        print(f"Error updating vocabulary review: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""

@@ -20,19 +20,13 @@ GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
 # Turath.io API configuration
 BASE_URL = 'https://files.turath.io/books-v3-unobfus'
 
-# Database configuration
-DB_CONFIG = {
-    'host': os.getenv('DB_HOST', 'localhost'),
-    'database': os.getenv('DB_NAME', 'readarabic'),
-    'user': os.getenv('DB_USER', 'postgres'),
-    'password': os.getenv('DB_PASSWORD', ''),
-    'port': os.getenv('DB_PORT', '5432')
-}
+# Database configuration - using DATABASE_URL for Heroku compatibility
+DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://localhost:5432/readarabic')
 
 def get_db_connection():
-    """Create a database connection."""
+    """Create a database connection using DATABASE_URL."""
     try:
-        conn = psycopg2.connect(**DB_CONFIG)
+        conn = psycopg2.connect(DATABASE_URL)
         return conn
     except Exception as e:
         print(f"Database connection error: {e}")

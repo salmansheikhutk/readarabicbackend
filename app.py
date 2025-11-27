@@ -6,11 +6,16 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
 from dotenv import load_dotenv
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for React frontend
+
+GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
+GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
 
 # Turath.io API configuration
 BASE_URL = 'https://files.turath.io/books-v3-unobfus'
@@ -286,6 +291,205 @@ def define_word(word):
         }), 500
     except Exception as e:
         print(f"ERROR: Unexpected error for word '{word}': {str(e)}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/auth/google/callback', methods=['POST'])
+def google_auth_callback():
+    """Exchange Google OAuth code for user info"""
+    print("\n=== GOOGLE AUTH CALLBACK ===")
+    try:
+        data = request.get_json()
+        print(f"Received data: {data}")
+        code = data.get('code')
+        redirect_uri = data.get('redirect_uri')
+        print(f"Code: {code[:20]}... Redirect URI: {redirect_uri}")
+        
+        if not code:
+            return jsonify({
+                'success': False,
+                'error': 'No authorization code provided'
+            }), 400
+        
+        # Exchange code for access token
+        token_url = 'https://oauth2.googleapis.com/token'
+        token_data = {
+            'code': code,
+            'client_id': GOOGLE_CLIENT_ID,
+            'client_secret': GOOGLE_CLIENT_SECRET,
+            'redirect_uri': redirect_uri,
+            'grant_type': 'authorization_code'
+        }
+        
+        token_response = requests.post(token_url, data=token_data)
+        token_json = token_response.json()
+        print(f"Token response: {token_json}")
+        
+        if 'error' in token_json:
+            print(f"Token error: {token_json}")
+            return jsonify({
+                'success': False,
+                'error': token_json.get('error_description', 'Token exchange failed')
+            }), 400
+        
+        # Get user info using access token
+        access_token = token_json.get('access_token')
+        userinfo_url = 'https://www.googleapis.com/oauth2/v2/userinfo'
+        headers = {'Authorization': f'Bearer {access_token}'}
+        userinfo_response = requests.get(userinfo_url, headers=headers)
+        userinfo = userinfo_response.json()
+        
+        # Get user details
+        google_id = userinfo.get('id')
+        email = userinfo.get('email')
+        name = userinfo.get('name', '')
+        profile_picture = userinfo.get('picture', '')
+        
+        # Connect to database
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'success': False,
+                'error': 'Database connection failed'
+            }), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Insert or update user
+        cursor.execute("""
+            INSERT INTO users (google_id, email, name, profile_picture)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (google_id) 
+            DO UPDATE SET 
+                email = EXCLUDED.email,
+                name = EXCLUDED.name,
+                profile_picture = EXCLUDED.profile_picture
+            RETURNING id, google_id, email, name, profile_picture, created_at
+        """, (google_id, email, name, profile_picture))
+        
+        user = cursor.fetchone()
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'user': dict(user)
+        })
+        
+    except Exception as e:
+        print(f"Error in Google auth callback: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/vocabulary', methods=['POST'])
+def save_vocabulary():
+    """Save a word to user's vocabulary"""
+    try:
+        data = request.get_json()
+        user_id = data.get('user_id')
+        word = data.get('word')
+        translation = data.get('translation')
+        book_id = data.get('book_id')
+        page_number = data.get('page_number')
+        volume_number = data.get('volume_number')
+        word_position = data.get('word_position')
+        
+        if not user_id or not word or not translation:
+            return jsonify({
+                'success': False,
+                'error': 'Missing required fields'
+            }), 400
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'success': False,
+                'error': 'Database connection failed'
+            }), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Insert or update vocabulary
+        cursor.execute("""
+            INSERT INTO user_vocabulary (user_id, word, translation, book_id, page_number, volume_number, word_position)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (user_id, word, book_id, page_number, word_position) 
+            DO UPDATE SET 
+                translation = EXCLUDED.translation,
+                learned_at = CURRENT_TIMESTAMP
+            RETURNING id, word, translation, learned_at
+        """, (user_id, word, translation, book_id, page_number, volume_number, word_position))
+        
+        vocab = cursor.fetchone()
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'vocabulary': dict(vocab)
+        })
+        
+    except Exception as e:
+        print(f"Error saving vocabulary: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/vocabulary/<int:user_id>', methods=['GET'])
+def get_vocabulary(user_id):
+    """Get user's vocabulary, optionally filtered by book"""
+    try:
+        book_id = request.args.get('book_id', type=int)
+        print(f"\n=== GET VOCABULARY ===")
+        print(f"User ID: {user_id}")
+        print(f"Book ID: {book_id}")
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'success': False,
+                'error': 'Database connection failed'
+            }), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        query = """
+            SELECT id, word, translation, book_id, page_number, volume_number, word_position, learned_at
+            FROM user_vocabulary
+            WHERE user_id = %s
+        """
+        params = [user_id]
+        
+        if book_id:
+            query += " AND book_id = %s"
+            params.append(book_id)
+        
+        query += " ORDER BY learned_at DESC"
+        
+        cursor.execute(query, params)
+        vocabulary = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        print(f"Found {len(vocabulary)} vocabulary items")
+        
+        return jsonify({
+            'success': True,
+            'vocabulary': vocabulary
+        })
+        
+    except Exception as e:
+        print(f"Error fetching vocabulary: {e}")
         traceback.print_exc()
         return jsonify({
             'success': False,

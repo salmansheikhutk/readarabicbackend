@@ -410,6 +410,48 @@ def save_vocabulary():
         
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
+        # Check if user has active subscription
+        cursor.execute("""
+            SELECT COUNT(*) as sub_count FROM subscriptions 
+            WHERE user_id = %s AND status = 'active'
+        """, (user_id,))
+        
+        sub_result = cursor.fetchone()
+        has_subscription = sub_result['sub_count'] > 0
+        
+        # If no subscription, check vocabulary count
+        if not has_subscription:
+            cursor.execute("""
+                SELECT COUNT(*) as vocab_count FROM user_vocabulary WHERE user_id = %s
+            """, (user_id,))
+            
+            vocab_result = cursor.fetchone()
+            vocab_count = vocab_result['vocab_count']
+            
+            print(f"🔍 User {user_id} - No subscription - Vocab count: {vocab_count}")
+            
+            # Check if this exact entry already exists (updates are allowed)
+            cursor.execute("""
+                SELECT id FROM user_vocabulary 
+                WHERE user_id = %s AND word = %s AND book_id = %s AND page_number = %s AND word_position = %s
+            """, (user_id, word, book_id, page_number, word_position))
+            
+            existing = cursor.fetchone()
+            
+            print(f"🔍 Word '{word}' - Existing entry: {existing is not None}")
+            
+            # Block if they have 5+ words and this is a new entry
+            if vocab_count >= 5 and not existing:
+                print(f"🚫 BLOCKING: User has {vocab_count} words and this is a NEW entry")
+                cursor.close()
+                conn.close()
+                return jsonify({
+                    'success': False,
+                    'error': 'FREE_LIMIT_REACHED',
+                    'message': 'Free tier limited to 5 words. Please upgrade to continue.',
+                    'vocab_count': vocab_count
+                }), 403
+        
         # Insert or update vocabulary
         cursor.execute("""
             INSERT INTO user_vocabulary (user_id, word, translation, book_id, page_number, volume_number, word_position)
@@ -718,6 +760,135 @@ def update_vocabulary_review(vocab_id):
         
     except Exception as e:
         print(f"Error updating vocabulary review: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/subscription/status/<int:user_id>', methods=['GET'])
+def get_subscription_status(user_id):
+    """Get user's subscription status"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'success': False,
+                'error': 'Database connection failed'
+            }), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get active subscription
+        cursor.execute("""
+            SELECT id, subscription_type, status, amount, currency,
+                   started_at, expires_at, next_billing_date,
+                   (SELECT COUNT(DISTINCT word) FROM user_vocabulary WHERE user_id = %s) as vocab_count
+            FROM subscriptions
+            WHERE user_id = %s AND status = 'active'
+            ORDER BY started_at DESC
+            LIMIT 1
+        """, (user_id, user_id))
+        
+        subscription = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if subscription:
+            return jsonify({
+                'success': True,
+                'subscription': dict(subscription),
+                'is_premium': True
+            })
+        else:
+            # Free tier
+            conn = get_db_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute("""
+                SELECT COUNT(DISTINCT word) as vocab_count
+                FROM user_vocabulary
+                WHERE user_id = %s
+            """, (user_id,))
+            result = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            
+            return jsonify({
+                'success': True,
+                'subscription': None,
+                'is_premium': False,
+                'vocab_count': result['vocab_count'] if result else 0,
+                'free_limit': 5
+            })
+    
+    except Exception as e:
+        print(f"Error fetching subscription status: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/subscription/create', methods=['POST'])
+def create_subscription():
+    """Create a new subscription after PayPal approval"""
+    try:
+        data = request.get_json()
+        user_id = data.get('user_id')
+        subscription_type = data.get('subscription_type')  # 'monthly' or 'annual'
+        paypal_subscription_id = data.get('paypal_subscription_id')
+        paypal_plan_id = data.get('paypal_plan_id')
+        
+        if not all([user_id, subscription_type, paypal_subscription_id]):
+            return jsonify({
+                'success': False,
+                'error': 'Missing required fields'
+            }), 400
+        
+        # Set amount based on subscription type
+        amount = 4.99 if subscription_type == 'monthly' else 49.99
+        
+        # Calculate expiration date
+        from datetime import datetime, timedelta
+        started_at = datetime.now()
+        if subscription_type == 'monthly':
+            expires_at = started_at + timedelta(days=30)
+            next_billing = started_at + timedelta(days=30)
+        else:
+            expires_at = started_at + timedelta(days=365)
+            next_billing = started_at + timedelta(days=365)
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'success': False,
+                'error': 'Database connection failed'
+            }), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Insert subscription
+        cursor.execute("""
+            INSERT INTO subscriptions 
+            (user_id, subscription_type, status, paypal_subscription_id, paypal_plan_id, 
+             amount, currency, started_at, expires_at, next_billing_date)
+            VALUES (%s, %s, 'active', %s, %s, %s, 'USD', %s, %s, %s)
+            RETURNING id, subscription_type, status, amount, expires_at
+        """, (user_id, subscription_type, paypal_subscription_id, paypal_plan_id, 
+              amount, started_at, expires_at, next_billing))
+        
+        subscription = cursor.fetchone()
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'subscription': dict(subscription)
+        })
+    
+    except Exception as e:
+        print(f"Error creating subscription: {e}")
         traceback.print_exc()
         return jsonify({
             'success': False,

@@ -445,6 +445,53 @@ def save_vocabulary():
             'error': str(e)
         }), 500
 
+@app.route('/api/vocabulary/<int:user_id>/recent-books', methods=['GET'])
+def get_recent_books(user_id):
+    """Get recently read books based on user's vocabulary"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'success': False,
+                'error': 'Database connection failed'
+            }), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get unique book IDs with most recent learned_at, ordered by recency
+        query = """
+            SELECT uv.book_id,
+                   bm.id, bm.name, bm.type, bm.info, bm.version, 
+                   bm.cat_id, bc.category_name,
+                   MAX(uv.learned_at) as last_read
+            FROM user_vocabulary uv
+            JOIN books_metadata bm ON uv.book_id = bm.id
+            LEFT JOIN book_categories bc ON bm.cat_id = bc.cat_id
+            WHERE uv.user_id = %s
+            GROUP BY uv.book_id, bm.id, bm.name, bm.type, bm.info, 
+                     bm.version, bm.cat_id, bc.category_name
+            ORDER BY last_read DESC
+            LIMIT 5
+        """
+        
+        cursor.execute(query, (user_id,))
+        books = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'books': books
+        })
+        
+    except Exception as e:
+        print(f"Error fetching recent books: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 @app.route('/api/vocabulary/<int:user_id>', methods=['GET'])
 def get_vocabulary(user_id):
     """Get user's vocabulary, optionally filtered by book"""

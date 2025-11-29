@@ -779,13 +779,14 @@ def get_subscription_status(user_id):
         
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Get active subscription
+        # Get active or cancelled subscription that's still valid
         cursor.execute("""
             SELECT id, subscription_type, status, amount, currency,
-                   started_at, expires_at, next_billing_date,
+                   started_at, expires_at, next_billing_date, cancelled_at,
                    (SELECT COUNT(DISTINCT word) FROM user_vocabulary WHERE user_id = %s) as vocab_count
             FROM subscriptions
-            WHERE user_id = %s AND status = 'active'
+            WHERE user_id = %s 
+              AND (status = 'active' OR (status = 'cancelled' AND expires_at > NOW()))
             ORDER BY started_at DESC
             LIMIT 1
         """, (user_id, user_id))
@@ -889,6 +890,53 @@ def create_subscription():
     
     except Exception as e:
         print(f"Error creating subscription: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/subscription/cancel/<int:user_id>', methods=['POST'])
+def cancel_subscription(user_id):
+    """Cancel user's active subscription"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'success': False,
+                'error': 'Database connection failed'
+            }), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Update subscription status to cancelled
+        cursor.execute("""
+            UPDATE subscriptions
+            SET status = 'cancelled',
+                cancelled_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = %s AND status = 'active'
+            RETURNING id, subscription_type, status, cancelled_at
+        """, (user_id,))
+        
+        result = cursor.fetchone()
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        if result:
+            return jsonify({
+                'success': True,
+                'subscription': dict(result)
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'No active subscription found'
+            }), 404
+    
+    except Exception as e:
+        print(f"Error cancelling subscription: {e}")
         traceback.print_exc()
         return jsonify({
             'success': False,

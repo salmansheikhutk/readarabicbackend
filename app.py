@@ -12,7 +12,11 @@ from google.auth.transport import requests as google_requests
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for React frontend
+# Enable CORS for React frontend - allow both local and production domains
+CORS(app, origins=[
+    "http://localhost:3000",
+    "https://readarabic-react-dev-fc4e6ef30adb.herokuapp.com"
+])
 
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')

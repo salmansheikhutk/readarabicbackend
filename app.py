@@ -868,15 +868,40 @@ def create_subscription():
         
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Insert subscription
+        # Check if user already has a subscription (active or cancelled)
         cursor.execute("""
-            INSERT INTO subscriptions 
-            (user_id, subscription_type, status, paypal_subscription_id, paypal_plan_id, 
-             amount, currency, started_at, expires_at, next_billing_date)
-            VALUES (%s, %s, 'active', %s, %s, %s, 'USD', %s, %s, %s)
-            RETURNING id, subscription_type, status, amount, expires_at
-        """, (user_id, subscription_type, paypal_subscription_id, paypal_plan_id, 
-              amount, started_at, expires_at, next_billing))
+            SELECT id FROM subscriptions WHERE user_id = %s
+        """, (user_id,))
+        existing = cursor.fetchone()
+        
+        if existing:
+            # Update existing subscription
+            cursor.execute("""
+                UPDATE subscriptions 
+                SET subscription_type = %s, 
+                    status = 'active', 
+                    paypal_subscription_id = %s, 
+                    paypal_plan_id = %s,
+                    amount = %s, 
+                    currency = 'USD', 
+                    started_at = %s, 
+                    expires_at = %s, 
+                    next_billing_date = %s,
+                    cancelled_at = NULL
+                WHERE user_id = %s
+                RETURNING id, subscription_type, status, amount, expires_at
+            """, (subscription_type, paypal_subscription_id, paypal_plan_id, 
+                  amount, started_at, expires_at, next_billing, user_id))
+        else:
+            # Insert new subscription
+            cursor.execute("""
+                INSERT INTO subscriptions 
+                (user_id, subscription_type, status, paypal_subscription_id, paypal_plan_id, 
+                 amount, currency, started_at, expires_at, next_billing_date)
+                VALUES (%s, %s, 'active', %s, %s, %s, 'USD', %s, %s, %s)
+                RETURNING id, subscription_type, status, amount, expires_at
+            """, (user_id, subscription_type, paypal_subscription_id, paypal_plan_id, 
+                  amount, started_at, expires_at, next_billing))
         
         subscription = cursor.fetchone()
         conn.commit()

@@ -13,10 +13,15 @@ load_dotenv()
 
 app = Flask(__name__)
 # Enable CORS for React frontend - allow both local and production domains
-CORS(app, origins=[
-    "http://localhost:3000",
-    "https://readarabic-react-dev-fc4e6ef30adb.herokuapp.com"
-])
+CORS(app, 
+     origins=[
+         "http://localhost:3000",
+         "https://readarabic-react-dev-fc4e6ef30adb.herokuapp.com"
+     ],
+     supports_credentials=True,
+     allow_headers=["Content-Type", "Authorization"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+)
 
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')

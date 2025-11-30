@@ -18,7 +18,8 @@ CORS(app,
          "http://localhost:3000",
          "https://readarabic-react-dev-fc4e6ef30adb.herokuapp.com",  # dev
          "https://readarabic-react-main-cbf1b4fd8391.herokuapp.com",  # prod heroku
-         "https://www.readarabic.io"  # prod custom domain
+        "https://www.readarabic.io",  # prod custom domain
+        "https://readarabic.io"  # apex domain
      ],
      supports_credentials=True,
      allow_headers=["Content-Type", "Authorization"],

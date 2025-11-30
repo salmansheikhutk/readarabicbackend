@@ -16,7 +16,9 @@ app = Flask(__name__)
 CORS(app, 
      origins=[
          "http://localhost:3000",
-         "https://readarabic-react-dev-fc4e6ef30adb.herokuapp.com"
+         "https://readarabic-react-dev-fc4e6ef30adb.herokuapp.com",  # dev
+         "https://readarabic-react-main-cbf1b4fd8391.herokuapp.com",  # prod heroku
+         "https://www.readarabic.io"  # prod custom domain
      ],
      supports_credentials=True,
      allow_headers=["Content-Type", "Authorization"],

@@ -31,6 +31,9 @@ BASE_URL = 'https://files.turath.io/books-v3-unobfus'
 
 # Database configuration - using DATABASE_URL for Heroku compatibility
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://localhost:5432/readarabic')
+# Heroku uses postgres:// but psycopg2 needs postgresql://
+if DATABASE_URL and DATABASE_URL.startswith('postgres://'):
+    DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
 
 def get_db_connection():
     """Create a database connection using DATABASE_URL."""

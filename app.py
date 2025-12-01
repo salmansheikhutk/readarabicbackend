@@ -425,10 +425,11 @@ def save_vocabulary():
         
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Check if user has active subscription
+        # Check if user has active subscription (including cancelled but still valid)
         cursor.execute("""
             SELECT COUNT(*) as sub_count FROM subscriptions 
-            WHERE user_id = %s AND status = 'active'
+            WHERE user_id = %s 
+              AND (status = 'active' OR (status = 'cancelled' AND expires_at > NOW()))
         """, (user_id,))
         
         sub_result = cursor.fetchone()

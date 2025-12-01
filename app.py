@@ -18,7 +18,8 @@ CORS(app,
          "http://localhost:3000",
          "https://readarabic-react-dev-fc4e6ef30adb.herokuapp.com",  # dev
          "https://readarabic-react-main-cbf1b4fd8391.herokuapp.com",  # prod heroku
-         "https://www.readarabic.io"  # prod custom domain
+        "https://www.readarabic.io",  # prod custom domain
+        "https://readarabic.io"  # apex domain
      ],
      supports_credentials=True,
      allow_headers=["Content-Type", "Authorization"],
@@ -424,10 +425,11 @@ def save_vocabulary():
         
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Check if user has active subscription
+        # Check if user has active subscription (including cancelled but still valid)
         cursor.execute("""
             SELECT COUNT(*) as sub_count FROM subscriptions 
-            WHERE user_id = %s AND status = 'active'
+            WHERE user_id = %s 
+              AND (status = 'active' OR (status = 'cancelled' AND expires_at > NOW()))
         """, (user_id,))
         
         sub_result = cursor.fetchone()

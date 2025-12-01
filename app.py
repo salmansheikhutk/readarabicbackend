@@ -641,6 +641,51 @@ def update_vocabulary(vocab_id):
             'error': str(e)
         }), 500
 
+@app.route('/api/vocabulary/<int:vocab_id>', methods=['DELETE'])
+def delete_vocabulary(vocab_id):
+    """Delete a vocabulary entry"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'success': False,
+                'error': 'Database connection failed'
+            }), 500
+        
+        cursor = conn.cursor()
+        
+        # Delete the vocabulary entry
+        cursor.execute("""
+            DELETE FROM user_vocabulary
+            WHERE id = %s
+        """, (vocab_id,))
+        
+        # Check if any rows were affected
+        if cursor.rowcount == 0:
+            cursor.close()
+            conn.close()
+            return jsonify({
+                'success': False,
+                'error': 'Vocabulary entry not found'
+            }), 404
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Vocabulary entry deleted successfully'
+        })
+        
+    except Exception as e:
+        print(f"Error deleting vocabulary: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 @app.route('/api/vocabulary/due/<int:user_id>', methods=['GET'])
 def get_due_vocabulary(user_id):
     """Get vocabulary words that are due for review"""

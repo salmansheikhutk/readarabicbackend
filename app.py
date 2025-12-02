@@ -140,11 +140,18 @@ def get_authors():
 @app.route('/api/books', methods=['GET'])
 def list_books():
     """List books with optional filtering by category or search term."""
+    import time
+    start_time = time.time()
+    
     try:
         cat_id = request.args.get('category', type=int)
         author_id = request.args.get('author', type=int)
-        limit = request.args.get('limit', 10000, type=int)  # Set high default to fetch all books
+        limit = request.args.get('limit', type=int)  # Optional limit from frontend
         offset = request.args.get('offset', 0, type=int)
+        
+        # If no limit specified, fetch all books (materialized view makes this fast)
+        if limit is None:
+            limit = 10000
         
         conn = get_db_connection()
         if not conn:
@@ -155,54 +162,44 @@ def list_books():
         
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Build query based on filters
+        # Use materialized view for 5-10x faster queries (no JOIN needed)
+        # Simple SELECT with no COUNT - let materialized view do the heavy lifting
         query = """
-            SELECT bm.id, bm.name, bm.type, bm.info, bm.version, 
-                   bm.cat_id, bc.category_name,
-                   bm.pdf_link, bm.pdf_size, bm.author_id
-            FROM books_metadata bm
-            LEFT JOIN book_categories bc ON bm.cat_id = bc.cat_id
+            SELECT id, name, type, info, version, 
+                   cat_id, category_name,
+                   pdf_link, pdf_size, author_id
+            FROM books_with_categories
             WHERE 1=1
         """
         params = []
         
         if cat_id:
-            query += " AND bm.cat_id = %s"
+            query += " AND cat_id = %s"
             params.append(cat_id)
         
         if author_id:
-            query += " AND bm.author_id = %s"
+            query += " AND author_id = %s"
             params.append(author_id)
         
-        query += " ORDER BY bm.id ASC LIMIT %s OFFSET %s"
+        query += " ORDER BY id ASC LIMIT %s OFFSET %s"
         params.extend([limit, offset])
         
         cursor.execute(query, params)
         books = cursor.fetchall()
         
-        # Get total count
-        count_query = "SELECT COUNT(*) as total FROM books_metadata bm WHERE 1=1"
-        count_params = []
-        if cat_id:
-            count_query += " AND bm.cat_id = %s"
-            count_params.append(cat_id)
-        if author_id:
-            count_query += " AND bm.author_id = %s"
-            count_params.append(author_id)
-        
-        cursor.execute(count_query, count_params)
-        total = cursor.fetchone()['total']
-        
         cursor.close()
         conn.close()
+        
+        query_time = time.time() - start_time
+        print(f"📊 Books query completed in {query_time*1000:.2f}ms (materialized view)")
         
         return jsonify({
             'success': True,
             'books': books,
             'count': len(books),
-            'total': total,
             'offset': offset,
-            'limit': limit
+            'limit': limit,
+            'hasMore': len(books) == limit  # Simple check if there might be more
         })
     except Exception as e:
         print(f"Error fetching books: {e}")

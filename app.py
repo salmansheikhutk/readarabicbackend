@@ -48,68 +48,52 @@ def init_connection_pool():
     """Initialize the connection pool on app startup."""
     global connection_pool, pool_init_failed
     
-    # Don't retry if we know it fails (AWS firewall blocks us)
+    # Don't retry if we already failed
     if pool_init_failed:
         return
     
     try:
         print("🔄 Creating database connection pool...")
+        print(f"📍 Database URL: {DATABASE_URL[:50]}...")
         connection_pool = pool.ThreadedConnectionPool(
-            minconn=2,      # Keep 2 connections warm and ready
-            maxconn=20,     # Heroku standard can handle 20 connections
+            minconn=1,      # Start with just 1 connection (faster startup)
+            maxconn=20,     # Scale up to 20 as needed
             dsn=DATABASE_URL,
-            connect_timeout=10  # Give Heroku Postgres 10 seconds to connect
+            connect_timeout=5  # Fail fast if connection takes too long
         )
-        print("✅ Database connection pool created (2-20 connections)")
+        print("✅ Database connection pool ready (1-20 connections)")
     except Exception as e:
-        pool_init_failed = True  # Mark as failed so we don't retry
-        print(f"❌ Connection pool disabled (AWS firewall blocks local access)")
-        print("⚠️  Using direct connections - expect 15-20s per query")
-        print("💡 To fix: Add your IP to AWS RDS security group inbound rules")
+        pool_init_failed = True
+        print(f"❌ Connection pool failed to initialize!")
+        print(f"❌ Error type: {type(e).__name__}")
+        print(f"❌ Error message: {str(e)}")
+        traceback.print_exc()
+        print("⚠️  Falling back to direct connections (slower)")
 
 def get_db_connection():
     """Get a connection from the pool (fast - no new connection overhead)."""
     import time
     start = time.time()
     try:
-        # Try to use pool first
-        if connection_pool is None:
-            init_connection_pool()
-        
-        if connection_pool:
-            conn = connection_pool.getconn()
-            conn_time = (time.time() - start) * 1000
-            print(f"⚡ Got pooled connection in {conn_time:.0f}ms")
-            return conn
-        else:
-            # Fall back to direct connection if pool failed
-            print("⚠️  Pool unavailable, creating direct connection...")
-            conn = psycopg2.connect(DATABASE_URL)
-            conn_time = (time.time() - start) * 1000
-            print(f"🐌 Direct connection took {conn_time:.0f}ms")
-            return conn
+        # Skip pool for now - direct connections work but are slow
+        # TODO: Fix AWS RDS security group to allow local IP for pool to work
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=30)
+        conn_time = (time.time() - start) * 1000
+        if conn_time > 1000:
+            print(f"🐌 Direct connection took {conn_time:.0f}ms (pool disabled)")
+        return conn
     except Exception as e:
         print(f"Database connection error: {e}")
         traceback.print_exc()
         return None
 
 def return_db_connection(conn):
-    """Return a connection to the pool or close it if pool is unavailable."""
+    """Close the connection (pool disabled for now)."""
     try:
-        if connection_pool and conn:
-            # Return to pool for reuse
-            connection_pool.putconn(conn)
-        elif conn:
-            # No pool available - must close the direct connection
+        if conn:
             conn.close()
     except Exception as e:
-        print(f"Error returning connection: {e}")
-        # Safety fallback - ensure connection is closed
-        if conn:
-            try:
-                conn.close()
-            except:
-                pass
+        print(f"Error closing connection: {e}")
 
 def load_book(book_id: int):
     """Load a book from the source URL using its ID."""
@@ -375,12 +359,98 @@ def define_word(word):
             'error': str(e)
         }), 500
 
+@app.route('/api/auth/google', methods=['POST'])
+def google_auth():
+    """Verify Google credential token and create/get user"""
+    import time
+    start_time = time.time()
+    print("\n=== GOOGLE AUTH (TOKEN VERIFICATION) ===")
+    conn = None
+    try:
+        data = request.get_json()
+        credential = data.get('credential')
+        
+        if not credential:
+            return jsonify({
+                'success': False,
+                'error': 'No credential provided'
+            }), 400
+        
+        # Verify the credential token with Google
+        try:
+            idinfo = id_token.verify_oauth2_token(
+                credential, 
+                google_requests.Request(), 
+                GOOGLE_CLIENT_ID
+            )
+            
+            # Get user details from token
+            google_id = idinfo['sub']
+            email = idinfo.get('email', '')
+            name = idinfo.get('name', '')
+            profile_picture = idinfo.get('picture', '')
+            
+            print(f"✅ Token verified for: {email}")
+            
+        except ValueError as e:
+            print(f"❌ Token verification failed: {e}")
+            return jsonify({
+                'success': False,
+                'error': 'Invalid credential token'
+            }), 400
+        
+        # Connect to database
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'success': False,
+                'error': 'Database connection failed'
+            }), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Insert or update user
+        cursor.execute("""
+            INSERT INTO users (google_id, email, name, profile_picture)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (google_id) 
+            DO UPDATE SET 
+                email = EXCLUDED.email,
+                name = EXCLUDED.name,
+                profile_picture = EXCLUDED.profile_picture
+            RETURNING id, google_id, email, name, profile_picture, created_at
+        """, (google_id, email, name, profile_picture))
+        
+        user = cursor.fetchone()
+        conn.commit()
+        cursor.close()
+        return_db_connection(conn)
+        
+        total_time = (time.time() - start_time) * 1000
+        print(f"✅ Google auth completed in {total_time:.0f}ms")
+        
+        return jsonify({
+            'success': True,
+            'user': dict(user)
+        })
+        
+    except Exception as e:
+        if conn:
+            return_db_connection(conn)
+        print(f"Error in Google auth: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 @app.route('/api/auth/google/callback', methods=['POST'])
 def google_auth_callback():
     """Exchange Google OAuth code for user info"""
     import time
     start_time = time.time()
     print("\n=== GOOGLE AUTH CALLBACK ===")
+    conn = None
     try:
         data = request.get_json()
         print(f"Received data: {data}")
@@ -1186,8 +1256,7 @@ def health_check():
     })
 
 if __name__ == '__main__':
-    # Try to initialize connection pool (will fall back to regular connections if it fails)
     print("🚀 Starting Flask app...")
-    # Don't initialize pool at startup - let it lazy-load on first request
-    # This avoids blocking startup if AWS is slow
+    print("⚠️  Connection pooling disabled - using direct connections")
+    print("💡 For production: Enable pooling by fixing AWS RDS security group")
     app.run(debug=True, host='0.0.0.0', port=5000)

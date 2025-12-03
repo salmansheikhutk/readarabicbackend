@@ -8,6 +8,7 @@ import os
 from dotenv import load_dotenv
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
+import openai
 
 load_dotenv()
 
@@ -1025,6 +1026,49 @@ def cancel_subscription(user_id):
             'success': False,
             'error': str(e)
         }), 500
+
+@app.route('/api/translate', methods=['POST'])
+def translate_text():
+    """Translate Arabic text using OpenAI API (secure backend endpoint)"""
+    if not request.json or 'text' not in request.json:
+        return jsonify({'success': False, 'error': 'Missing text parameter'}), 400
+    
+    text = request.json['text']
+    is_single_word = request.json.get('is_single_word', False)
+    
+    try:
+        openai.api_key = os.environ.get('OPENAI_API_KEY')
+        
+        if not openai.api_key:
+            return jsonify({'success': False, 'error': 'OpenAI API key not configured'}), 500
+        
+        response = openai.ChatCompletion.create(
+            model='gpt-3.5-turbo',
+            messages=[
+                {
+                    'role': 'system',
+                    'content': 'You are a translator. Translate the given Arabic text to English. Only provide the translation, no explanations.'
+                },
+                {
+                    'role': 'user',
+                    'content': f'Translate this Arabic text to English: {text}'
+                }
+            ],
+            max_tokens=200,
+            temperature=0.3
+        )
+        
+        translation = response.choices[0].message.content.strip()
+        return jsonify({
+            'success': True,
+            'translation': translation,
+            'is_single_word': is_single_word
+        })
+        
+    except Exception as e:
+        print(f"Translation error: {e}")
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/health', methods=['GET'])
 def health_check():

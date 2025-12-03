@@ -8,7 +8,6 @@ import os
 from dotenv import load_dotenv
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
-import openai
 
 load_dotenv()
 
@@ -1046,12 +1045,16 @@ def translate_text():
     is_single_word = request.json.get('is_single_word', False)
     
     try:
-        openai.api_key = os.environ.get('OPENAI_API_KEY')
+        api_key = os.environ.get('OPENAI_API_KEY')
         
-        if not openai.api_key:
+        if not api_key:
             return jsonify({'success': False, 'error': 'OpenAI API key not configured'}), 500
         
-        response = openai.ChatCompletion.create(
+        # Use new OpenAI 1.x API syntax
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        
+        response = client.chat.completions.create(
             model='gpt-3.5-turbo',
             messages=[
                 {

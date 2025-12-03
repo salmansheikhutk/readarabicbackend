@@ -38,15 +38,78 @@ DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://localhost:5432/readarabic
 if DATABASE_URL and DATABASE_URL.startswith('postgres://'):
     DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
 
-def get_db_connection():
-    """Create a database connection using DATABASE_URL."""
+# Connection pool - reuses connections instead of creating new ones
+from psycopg2 import pool
+connection_pool = None
+
+pool_init_failed = False  # Track if pool initialization has failed
+
+def init_connection_pool():
+    """Initialize the connection pool on app startup."""
+    global connection_pool, pool_init_failed
+    
+    # Don't retry if we know it fails (AWS firewall blocks us)
+    if pool_init_failed:
+        return
+    
     try:
-        conn = psycopg2.connect(DATABASE_URL)
-        return conn
+        print("🔄 Creating database connection pool...")
+        connection_pool = pool.ThreadedConnectionPool(
+            minconn=2,      # Keep 2 connections warm and ready
+            maxconn=20,     # Heroku standard can handle 20 connections
+            dsn=DATABASE_URL,
+            connect_timeout=10  # Give Heroku Postgres 10 seconds to connect
+        )
+        print("✅ Database connection pool created (2-20 connections)")
+    except Exception as e:
+        pool_init_failed = True  # Mark as failed so we don't retry
+        print(f"❌ Connection pool disabled (AWS firewall blocks local access)")
+        print("⚠️  Using direct connections - expect 15-20s per query")
+        print("💡 To fix: Add your IP to AWS RDS security group inbound rules")
+
+def get_db_connection():
+    """Get a connection from the pool (fast - no new connection overhead)."""
+    import time
+    start = time.time()
+    try:
+        # Try to use pool first
+        if connection_pool is None:
+            init_connection_pool()
+        
+        if connection_pool:
+            conn = connection_pool.getconn()
+            conn_time = (time.time() - start) * 1000
+            print(f"⚡ Got pooled connection in {conn_time:.0f}ms")
+            return conn
+        else:
+            # Fall back to direct connection if pool failed
+            print("⚠️  Pool unavailable, creating direct connection...")
+            conn = psycopg2.connect(DATABASE_URL)
+            conn_time = (time.time() - start) * 1000
+            print(f"🐌 Direct connection took {conn_time:.0f}ms")
+            return conn
     except Exception as e:
         print(f"Database connection error: {e}")
         traceback.print_exc()
         return None
+
+def return_db_connection(conn):
+    """Return a connection to the pool or close it if pool is unavailable."""
+    try:
+        if connection_pool and conn:
+            # Return to pool for reuse
+            connection_pool.putconn(conn)
+        elif conn:
+            # No pool available - must close the direct connection
+            conn.close()
+    except Exception as e:
+        print(f"Error returning connection: {e}")
+        # Safety fallback - ensure connection is closed
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
 
 def load_book(book_id: int):
     """Load a book from the source URL using its ID."""
@@ -69,6 +132,7 @@ def load_book(book_id: int):
 @app.route('/api/categories', methods=['GET'])
 def get_categories():
     """Get all book categories."""
+    conn = None
     try:
         conn = get_db_connection()
         if not conn:
@@ -86,13 +150,15 @@ def get_categories():
         """)
         categories = cursor.fetchall()
         cursor.close()
-        conn.close()
+        return_db_connection(conn)  # Return to pool
         
         return jsonify({
             'success': True,
             'categories': categories
         })
     except Exception as e:
+        if conn:
+            return_db_connection(conn)
         print(f"Error fetching categories: {e}")
         traceback.print_exc()
         return jsonify({
@@ -103,6 +169,7 @@ def get_categories():
 @app.route('/api/authors', methods=['GET'])
 def get_authors():
     """Get all authors."""
+    conn = None
     try:
         conn = get_db_connection()
         if not conn:
@@ -123,13 +190,15 @@ def get_authors():
         """)
         authors = cursor.fetchall()
         cursor.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify({
             'success': True,
             'authors': authors
         })
     except Exception as e:
+        if conn:
+            return_db_connection(conn)
         print(f"Error fetching authors: {e}")
         traceback.print_exc()
         return jsonify({
@@ -142,6 +211,7 @@ def list_books():
     """List books with optional filtering by category or search term."""
     import time
     start_time = time.time()
+    conn = None
     
     try:
         cat_id = request.args.get('category', type=int)
@@ -188,7 +258,7 @@ def list_books():
         books = cursor.fetchall()
         
         cursor.close()
-        conn.close()
+        return_db_connection(conn)  # Return to pool instead of closing
         
         query_time = time.time() - start_time
         print(f"📊 Books query completed in {query_time*1000:.2f}ms (materialized view)")
@@ -202,6 +272,8 @@ def list_books():
             'hasMore': len(books) == limit  # Simple check if there might be more
         })
     except Exception as e:
+        if conn:
+            return_db_connection(conn)
         print(f"Error fetching books: {e}")
         traceback.print_exc()
         return jsonify({
@@ -306,6 +378,8 @@ def define_word(word):
 @app.route('/api/auth/google/callback', methods=['POST'])
 def google_auth_callback():
     """Exchange Google OAuth code for user info"""
+    import time
+    start_time = time.time()
     print("\n=== GOOGLE AUTH CALLBACK ===")
     try:
         data = request.get_json()
@@ -330,8 +404,10 @@ def google_auth_callback():
             'grant_type': 'authorization_code'
         }
         
-        token_response = requests.post(token_url, data=token_data)
+        token_start = time.time()
+        token_response = requests.post(token_url, data=token_data, timeout=10)
         token_json = token_response.json()
+        print(f"⏱️  Token exchange took {(time.time() - token_start)*1000:.0f}ms")
         print(f"Token response: {token_json}")
         
         if 'error' in token_json:
@@ -345,8 +421,10 @@ def google_auth_callback():
         access_token = token_json.get('access_token')
         userinfo_url = 'https://www.googleapis.com/oauth2/v2/userinfo'
         headers = {'Authorization': f'Bearer {access_token}'}
-        userinfo_response = requests.get(userinfo_url, headers=headers)
+        userinfo_start = time.time()
+        userinfo_response = requests.get(userinfo_url, headers=headers, timeout=10)
         userinfo = userinfo_response.json()
+        print(f"⏱️  User info fetch took {(time.time() - userinfo_start)*1000:.0f}ms")
         
         # Get user details
         google_id = userinfo.get('id')
@@ -379,7 +457,10 @@ def google_auth_callback():
         user = cursor.fetchone()
         conn.commit()
         cursor.close()
-        conn.close()
+        return_db_connection(conn)
+        
+        total_time = (time.time() - start_time) * 1000
+        print(f"✅ Google auth completed in {total_time:.0f}ms")
         
         return jsonify({
             'success': True,
@@ -387,6 +468,8 @@ def google_auth_callback():
         })
         
     except Exception as e:
+        if conn:
+            return_db_connection(conn)
         print(f"Error in Google auth callback: {e}")
         traceback.print_exc()
         return jsonify({
@@ -397,6 +480,7 @@ def google_auth_callback():
 @app.route('/api/vocabulary', methods=['POST'])
 def save_vocabulary():
     """Save a word to user's vocabulary"""
+    conn = None
     try:
         data = request.get_json()
         user_id = data.get('user_id')
@@ -457,7 +541,7 @@ def save_vocabulary():
             if vocab_count >= 5 and not existing:
                 print(f"🚫 BLOCKING: User has {vocab_count} words and this is a NEW entry")
                 cursor.close()
-                conn.close()
+                return_db_connection(conn)
                 return jsonify({
                     'success': False,
                     'error': 'FREE_LIMIT_REACHED',
@@ -479,7 +563,7 @@ def save_vocabulary():
         vocab = cursor.fetchone()
         conn.commit()
         cursor.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify({
             'success': True,
@@ -487,6 +571,8 @@ def save_vocabulary():
         })
         
     except Exception as e:
+        if conn:
+            return_db_connection(conn)
         print(f"Error saving vocabulary: {e}")
         traceback.print_exc()
         return jsonify({
@@ -526,7 +612,7 @@ def get_recent_books(user_id):
         cursor.execute(query, (user_id,))
         books = cursor.fetchall()
         cursor.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify({
             'success': True,
@@ -534,6 +620,8 @@ def get_recent_books(user_id):
         })
         
     except Exception as e:
+        if conn:
+            return_db_connection(conn)
         print(f"Error fetching recent books: {e}")
         traceback.print_exc()
         return jsonify({
@@ -575,7 +663,7 @@ def get_vocabulary(user_id):
         cursor.execute(query, params)
         vocabulary = cursor.fetchall()
         cursor.close()
-        conn.close()
+        return_db_connection(conn)
         
         print(f"Found {len(vocabulary)} vocabulary items")
         
@@ -585,6 +673,8 @@ def get_vocabulary(user_id):
         })
         
     except Exception as e:
+        if conn:
+            return_db_connection(conn)
         print(f"Error fetching vocabulary: {e}")
         traceback.print_exc()
         return jsonify({
@@ -623,7 +713,7 @@ def update_vocabulary(vocab_id):
         
         conn.commit()
         cursor.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify({
             'success': True,
@@ -631,6 +721,8 @@ def update_vocabulary(vocab_id):
         })
         
     except Exception as e:
+        if conn:
+            return_db_connection(conn)
         print(f"Error updating vocabulary: {e}")
         traceback.print_exc()
         return jsonify({
@@ -660,7 +752,7 @@ def delete_vocabulary(vocab_id):
         # Check if any rows were affected
         if cursor.rowcount == 0:
             cursor.close()
-            conn.close()
+            return_db_connection(conn)
             return jsonify({
                 'success': False,
                 'error': 'Vocabulary entry not found'
@@ -668,7 +760,7 @@ def delete_vocabulary(vocab_id):
         
         conn.commit()
         cursor.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify({
             'success': True,
@@ -676,6 +768,8 @@ def delete_vocabulary(vocab_id):
         })
         
     except Exception as e:
+        if conn:
+            return_db_connection(conn)
         print(f"Error deleting vocabulary: {e}")
         traceback.print_exc()
         return jsonify({
@@ -716,7 +810,7 @@ def get_due_vocabulary(user_id):
         cursor.execute(query, params)
         due_words = cursor.fetchall()
         cursor.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify({
             'success': True,
@@ -725,6 +819,8 @@ def get_due_vocabulary(user_id):
         })
         
     except Exception as e:
+        if conn:
+            return_db_connection(conn)
         print(f"Error fetching due vocabulary: {e}")
         traceback.print_exc()
         return jsonify({
@@ -758,7 +854,7 @@ def update_vocabulary_review(vocab_id):
         vocab = cursor.fetchone()
         if not vocab:
             cursor.close()
-            conn.close()
+            return_db_connection(conn)
             return jsonify({
                 'success': False,
                 'error': 'Vocabulary item not found'
@@ -808,7 +904,7 @@ def update_vocabulary_review(vocab_id):
         
         conn.commit()
         cursor.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify({
             'success': True,
@@ -817,6 +913,8 @@ def update_vocabulary_review(vocab_id):
         })
         
     except Exception as e:
+        if conn:
+            return_db_connection(conn)
         print(f"Error updating vocabulary review: {e}")
         traceback.print_exc()
         return jsonify({
@@ -851,7 +949,7 @@ def get_subscription_status(user_id):
         
         subscription = cursor.fetchone()
         cursor.close()
-        conn.close()
+        return_db_connection(conn)
         
         if subscription:
             return jsonify({
@@ -870,7 +968,7 @@ def get_subscription_status(user_id):
             """, (user_id,))
             result = cursor.fetchone()
             cursor.close()
-            conn.close()
+            return_db_connection(conn)
             
             return jsonify({
                 'success': True,
@@ -881,6 +979,8 @@ def get_subscription_status(user_id):
             })
     
     except Exception as e:
+        if conn:
+            return_db_connection(conn)
         print(f"Error fetching subscription status: {e}")
         traceback.print_exc()
         return jsonify({
@@ -964,7 +1064,7 @@ def create_subscription():
         subscription = cursor.fetchone()
         conn.commit()
         cursor.close()
-        conn.close()
+        return_db_connection(conn)
         
         return jsonify({
             'success': True,
@@ -972,6 +1072,8 @@ def create_subscription():
         })
     
     except Exception as e:
+        if conn:
+            return_db_connection(conn)
         print(f"Error creating subscription: {e}")
         traceback.print_exc()
         return jsonify({
@@ -1005,7 +1107,7 @@ def cancel_subscription(user_id):
         result = cursor.fetchone()
         conn.commit()
         cursor.close()
-        conn.close()
+        return_db_connection(conn)
         
         if result:
             return jsonify({
@@ -1019,12 +1121,61 @@ def cancel_subscription(user_id):
             }), 404
     
     except Exception as e:
+        if conn:
+            return_db_connection(conn)
         print(f"Error cancelling subscription: {e}")
         traceback.print_exc()
         return jsonify({
             'success': False,
             'error': str(e)
         }), 500
+
+@app.route('/api/translate', methods=['POST'])
+def translate_text():
+    """Translate Arabic text using OpenAI API (secure backend endpoint)"""
+    if not request.json or 'text' not in request.json:
+        return jsonify({'success': False, 'error': 'Missing text parameter'}), 400
+    
+    text = request.json['text']
+    is_single_word = request.json.get('is_single_word', False)
+    
+    try:
+        api_key = os.environ.get('OPENAI_API_KEY')
+        
+        if not api_key:
+            return jsonify({'success': False, 'error': 'OpenAI API key not configured'}), 500
+        
+        # Use new OpenAI 1.x API syntax
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        
+        response = client.chat.completions.create(
+            model='gpt-3.5-turbo',
+            messages=[
+                {
+                    'role': 'system',
+                    'content': 'You are a translator. Translate the given Arabic text to English. Only provide the translation, no explanations.'
+                },
+                {
+                    'role': 'user',
+                    'content': f'Translate this Arabic text to English: {text}'
+                }
+            ],
+            max_tokens=200,
+            temperature=0.3
+        )
+        
+        translation = response.choices[0].message.content.strip()
+        return jsonify({
+            'success': True,
+            'translation': translation,
+            'is_single_word': is_single_word
+        })
+        
+    except Exception as e:
+        print(f"Translation error: {e}")
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
@@ -1035,4 +1186,8 @@ def health_check():
     })
 
 if __name__ == '__main__':
+    # Try to initialize connection pool (will fall back to regular connections if it fails)
+    print("🚀 Starting Flask app...")
+    # Don't initialize pool at startup - let it lazy-load on first request
+    # This avoids blocking startup if AWS is slow
     app.run(debug=True, host='0.0.0.0', port=5000)

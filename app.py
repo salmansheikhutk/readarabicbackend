@@ -307,6 +307,8 @@ def define_word(word):
 @app.route('/api/auth/google/callback', methods=['POST'])
 def google_auth_callback():
     """Exchange Google OAuth code for user info"""
+    import time
+    start_time = time.time()
     print("\n=== GOOGLE AUTH CALLBACK ===")
     try:
         data = request.get_json()
@@ -331,8 +333,10 @@ def google_auth_callback():
             'grant_type': 'authorization_code'
         }
         
-        token_response = requests.post(token_url, data=token_data)
+        token_start = time.time()
+        token_response = requests.post(token_url, data=token_data, timeout=10)
         token_json = token_response.json()
+        print(f"⏱️  Token exchange took {(time.time() - token_start)*1000:.0f}ms")
         print(f"Token response: {token_json}")
         
         if 'error' in token_json:
@@ -346,8 +350,10 @@ def google_auth_callback():
         access_token = token_json.get('access_token')
         userinfo_url = 'https://www.googleapis.com/oauth2/v2/userinfo'
         headers = {'Authorization': f'Bearer {access_token}'}
-        userinfo_response = requests.get(userinfo_url, headers=headers)
+        userinfo_start = time.time()
+        userinfo_response = requests.get(userinfo_url, headers=headers, timeout=10)
         userinfo = userinfo_response.json()
+        print(f"⏱️  User info fetch took {(time.time() - userinfo_start)*1000:.0f}ms")
         
         # Get user details
         google_id = userinfo.get('id')
@@ -381,6 +387,9 @@ def google_auth_callback():
         conn.commit()
         cursor.close()
         conn.close()
+        
+        total_time = (time.time() - start_time) * 1000
+        print(f"✅ Google auth completed in {total_time:.0f}ms")
         
         return jsonify({
             'success': True,

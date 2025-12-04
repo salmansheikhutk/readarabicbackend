@@ -8,6 +8,8 @@ import os
 from dotenv import load_dotenv
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
+from google.cloud import storage
+import json
 
 load_dotenv()
 
@@ -29,8 +31,9 @@ CORS(app,
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
 
-# Turath.io API configuration
-BASE_URL = 'https://files.turath.io/books-v3-unobfus'
+# Google Cloud Storage configuration
+BUCKET_NAME = 'linkquran-islamic-library-regional'
+storage_client = None
 
 # Database configuration - using DATABASE_URL for Heroku compatibility
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://localhost:5432/readarabic')
@@ -70,6 +73,44 @@ def init_connection_pool():
         traceback.print_exc()
         print("⚠️  Falling back to direct connections (slower)")
 
+def get_storage_client():
+    """Initializes and returns a singleton GCS client."""
+    global storage_client
+    if storage_client is None:
+        try:
+            print("🔄 Initializing Google Cloud Storage client...")
+            
+            # Explicitly load credentials from environment variable
+            # This is more robust for Heroku's environment
+            creds_json_str = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+            
+            if not creds_json_str:
+                print("❌ GOOGLE_APPLICATION_CREDENTIALS environment variable not set.")
+                return None
+
+            # The google-auth library expects credentials from a file or a dict.
+            # We will parse the JSON string from the env var into a dict.
+            from google.oauth2 import service_account
+            import json
+
+            try:
+                creds_info = json.loads(creds_json_str)
+                credentials = service_account.Credentials.from_service_account_info(creds_info)
+                storage_client = storage.Client(project='bookreader-423321', credentials=credentials)
+                print("✅ Google Cloud Storage client initialized explicitly from credentials.")
+
+            except json.JSONDecodeError:
+                print("❌ Failed to parse GOOGLE_APPLICATION_CREDENTIALS. It's not valid JSON.")
+                return None
+            except Exception as e:
+                print(f"❌ Failed to create credentials from info: {e}")
+                return None
+
+        except Exception as e:
+            print(f"❌ Failed to initialize Google Cloud Storage client: {e}")
+            traceback.print_exc()
+    return storage_client
+
 def get_db_connection():
     """Get a connection from the pool."""
     global connection_pool
@@ -102,20 +143,31 @@ def return_db_connection(conn):
         print(f"Error returning connection to pool: {e}")
 
 def load_book(book_id: int):
-    """Load a book from the source URL using its ID."""
-    print(f"Loading book {book_id}")
+    """Load a book from Google Cloud Storage."""
+    print(f"Loading book {book_id} from GCS bucket '{BUCKET_NAME}'")
+    client = get_storage_client()
+    if not client:
+        print("❌ GCS client not available, cannot load book.")
+        return None
+        
     try:
-        url = f"{BASE_URL}/{book_id}.json"
-        response = requests.get(url)
-        if response.status_code == 200:
-            book_data = response.json()
-            print(f"Successfully loaded book {book_id}")
-            return book_data
-        else:
-            print(f"Failed to fetch book {book_id}, status code: {response.status_code}")
+        bucket = client.bucket(BUCKET_NAME)
+        blob_name = f"{book_id}.json"
+        blob = bucket.blob(blob_name)
+        
+        if not blob.exists():
+            print(f"Failed to fetch book {book_id}, blob '{blob_name}' not found in bucket.")
             return None
+
+        # Download content as string and parse JSON
+        json_data = blob.download_as_text()
+        book_data = json.loads(json_data)
+        
+        print(f"✅ Successfully loaded book {book_id} from GCS")
+        return book_data
+        
     except Exception as e:
-        print(f"Error fetching book {book_id}: {e}")
+        print(f"Error fetching book {book_id} from GCS: {e}")
         traceback.print_exc()
         return None
 
@@ -1264,4 +1316,5 @@ def health_check():
 if __name__ == '__main__':
     print("🚀 Starting Flask app...")
     init_connection_pool()
+    get_storage_client() # Initialize GCS client on startup
     app.run(debug=True, host='0.0.0.0', port=5000)

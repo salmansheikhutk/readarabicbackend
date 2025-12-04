@@ -71,29 +71,35 @@ def init_connection_pool():
         print("⚠️  Falling back to direct connections (slower)")
 
 def get_db_connection():
-    """Get a connection from the pool (fast - no new connection overhead)."""
-    import time
-    start = time.time()
+    """Get a connection from the pool."""
+    global connection_pool
+    if connection_pool is None:
+        print("Pool not initialized, falling back to direct connection.")
+        try:
+            return psycopg2.connect(DATABASE_URL, connect_timeout=10)
+        except Exception as e:
+            print(f"Database connection error: {e}")
+            traceback.print_exc()
+            return None
     try:
-        # Skip pool for now - direct connections work but are slow
-        # TODO: Fix AWS RDS security group to allow local IP for pool to work
-        conn = psycopg2.connect(DATABASE_URL, connect_timeout=30)
-        conn_time = (time.time() - start) * 1000
-        if conn_time > 1000:
-            print(f"🐌 Direct connection took {conn_time:.0f}ms (pool disabled)")
-        return conn
+        return connection_pool.getconn()
     except Exception as e:
-        print(f"Database connection error: {e}")
+        print(f"Error getting connection from pool: {e}")
         traceback.print_exc()
         return None
 
 def return_db_connection(conn):
-    """Close the connection (pool disabled for now)."""
-    try:
+    """Return a connection to the pool."""
+    global connection_pool
+    if connection_pool is None:
         if conn:
             conn.close()
+        return
+    try:
+        if conn:
+            connection_pool.putconn(conn)
     except Exception as e:
-        print(f"Error closing connection: {e}")
+        print(f"Error returning connection to pool: {e}")
 
 def load_book(book_id: int):
     """Load a book from the source URL using its ID."""
@@ -1257,6 +1263,5 @@ def health_check():
 
 if __name__ == '__main__':
     print("🚀 Starting Flask app...")
-    print("⚠️  Connection pooling disabled - using direct connections")
-    print("💡 For production: Enable pooling by fixing AWS RDS security group")
+    init_connection_pool()
     app.run(debug=True, host='0.0.0.0', port=5000)

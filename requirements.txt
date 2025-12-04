@@ -7,3 +7,4 @@ python-dotenv==1.0.0
 google-auth==2.34.0
 gunicorn==21.2.0
 openai==2.8.1
+google-cloud-storage

@@ -79,9 +79,33 @@ def get_storage_client():
     if storage_client is None:
         try:
             print("🔄 Initializing Google Cloud Storage client...")
-            # The client will automatically find the GOOGLE_APPLICATION_CREDENTIALS env var
-            storage_client = storage.Client(project='bookreader-423321')
-            print("✅ Google Cloud Storage client initialized.")
+            
+            # Explicitly load credentials from environment variable
+            # This is more robust for Heroku's environment
+            creds_json_str = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+            
+            if not creds_json_str:
+                print("❌ GOOGLE_APPLICATION_CREDENTIALS environment variable not set.")
+                return None
+
+            # The google-auth library expects credentials from a file or a dict.
+            # We will parse the JSON string from the env var into a dict.
+            from google.oauth2 import service_account
+            import json
+
+            try:
+                creds_info = json.loads(creds_json_str)
+                credentials = service_account.Credentials.from_service_account_info(creds_info)
+                storage_client = storage.Client(project='bookreader-423321', credentials=credentials)
+                print("✅ Google Cloud Storage client initialized explicitly from credentials.")
+
+            except json.JSONDecodeError:
+                print("❌ Failed to parse GOOGLE_APPLICATION_CREDENTIALS. It's not valid JSON.")
+                return None
+            except Exception as e:
+                print(f"❌ Failed to create credentials from info: {e}")
+                return None
+
         except Exception as e:
             print(f"❌ Failed to initialize Google Cloud Storage client: {e}")
             traceback.print_exc()

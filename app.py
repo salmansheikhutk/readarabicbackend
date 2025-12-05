@@ -80,31 +80,28 @@ def get_storage_client():
         try:
             print("🔄 Initializing Google Cloud Storage client...")
             
-            # Explicitly load credentials from environment variable
-            # This is more robust for Heroku's environment
-            creds_json_str = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+            # This is now robust for both local (file path) and Heroku (JSON string)
+            creds_value = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
             
-            if not creds_json_str:
+            if not creds_value:
                 print("❌ GOOGLE_APPLICATION_CREDENTIALS environment variable not set.")
                 return None
 
-            # The google-auth library expects credentials from a file or a dict.
-            # We will parse the JSON string from the env var into a dict.
             from google.oauth2 import service_account
             import json
 
             try:
-                creds_info = json.loads(creds_json_str)
+                # Try to parse it as a JSON string first (for Heroku)
+                creds_info = json.loads(creds_value)
                 credentials = service_account.Credentials.from_service_account_info(creds_info)
-                storage_client = storage.Client(project='bookreader-423321', credentials=credentials)
-                print("✅ Google Cloud Storage client initialized explicitly from credentials.")
-
+                print("✅ GCS client initialized from JSON string (Heroku).")
             except json.JSONDecodeError:
-                print("❌ Failed to parse GOOGLE_APPLICATION_CREDENTIALS. It's not valid JSON.")
-                return None
-            except Exception as e:
-                print(f"❌ Failed to create credentials from info: {e}")
-                return None
+                # If that fails, treat it as a file path (for local dev)
+                print("...Not a JSON string, treating as a file path (local).")
+                credentials = service_account.Credentials.from_service_account_file(creds_value)
+                print("✅ GCS client initialized from file path (local).")
+
+            storage_client = storage.Client(project='bookreader-423321', credentials=credentials)
 
         except Exception as e:
             print(f"❌ Failed to initialize Google Cloud Storage client: {e}")
